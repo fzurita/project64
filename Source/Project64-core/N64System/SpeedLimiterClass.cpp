@@ -17,6 +17,7 @@
 // ---------------------------------------------------
 
 const uint32_t CSpeedLimiter::m_DefaultSpeed = 60;
+const uint32_t CSpeedLimiter::m_AverageSamples = 3;
 
 // ---------------------------------------------------
 
@@ -46,36 +47,72 @@ void CSpeedLimiter::FixSpeedRatio()
 
 bool CSpeedLimiter::Timer_Process(uint32_t * FrameRate)
 {
-    m_Frames += 1;
-    HighResTimeStamp CurrentTime;
-    CurrentTime.SetToNow();
+    static bool hasBeenReset = false;
+    static HighResTimeStamp StartFPSTime;
+    static uint32_t lastMicrosecondsPerFrame = 0;
+    static int64_t sleepTimes[m_AverageSamples];
+    static uint32_t sleepTimesIndex = 0;
+    static uint32_t lastFrameRateSet = 0;
+    HighResTimeStamp CurrentFPSTime;
+    CurrentFPSTime.SetToNow();
 
-    /* Calculate time that should of elapsed for this frame */
-    uint64_t LastTime = m_LastTime.GetMicroSeconds(), CurrentTimeValue = CurrentTime.GetMicroSeconds();
-    if (LastTime == 0)
+    //if this is the first time or we are resuming from pause
+    if (StartFPSTime.GetMicroSeconds() == 0 || !hasBeenReset || lastMicrosecondsPerFrame != m_MicroSecondsPerFrame)
     {
+        StartFPSTime = CurrentFPSTime;
+        m_LastTime = CurrentFPSTime;
         m_Frames = 0;
-        m_LastTime = CurrentTime;
-        return true;
+        lastFrameRateSet = 0;
+        hasBeenReset = true;
     }
-    uint64_t CalculatedTime = LastTime + (m_MicroSecondsPerFrame * m_Frames);
-    if (CurrentTimeValue < CalculatedTime)
+    else
     {
-        int32_t time = (int)(CalculatedTime - CurrentTimeValue);
-        if (time > 0)
-        {
-            pjutil::Sleep((time / 1000) + 1);
-        }
-        /* Refresh current time */
-        CurrentTime.SetToNow();
-        CurrentTimeValue = CurrentTime.GetMicroSeconds();
+        ++m_Frames;
     }
-    if (CurrentTimeValue - LastTime >= 1000000)
+
+    lastMicrosecondsPerFrame = m_MicroSecondsPerFrame;
+
+    int64_t totalElapsedGameTime = m_MicroSecondsPerFrame * m_Frames;
+    int64_t elapsedRealTime = CurrentFPSTime.GetMicroSeconds() - StartFPSTime.GetMicroSeconds();
+    int64_t sleepTime = totalElapsedGameTime - elapsedRealTime;
+
+    //Reset if the sleep needed is an unreasonable value
+    float speedFactor = static_cast<float>(m_Speed) / m_BaseSpeed;
+    static const int64_t minSleepNeeded = -50000;
+    static const int64_t maxSleepNeeded = 50000;
+    if (sleepTime < minSleepNeeded || sleepTime > (maxSleepNeeded*speedFactor))
+    {
+        hasBeenReset = false;
+    }
+
+    sleepTimes[sleepTimesIndex%m_AverageSamples] = sleepTime;
+    sleepTimesIndex++;
+
+    uint32_t elementsForAverage = sleepTimesIndex > m_AverageSamples ? m_AverageSamples : sleepTimesIndex;
+
+    // compute the average sleepTime
+    double sum = 0;
+    for (uint32_t index = 0; index < elementsForAverage; index++)
+    {
+        sum += sleepTimes[index];
+    }
+
+    int64_t averageSleepUs = static_cast<int64_t>(sum / elementsForAverage);
+
+    // Sleep for the average to smooth out jitter
+    if (averageSleepUs > 0 && averageSleepUs < maxSleepNeeded*speedFactor)
+    {
+        pjutil::Sleep(static_cast<uint32_t>(averageSleepUs / 1000));
+    }
+
+    float fpsInterval = static_cast<float>(CurrentFPSTime.GetMicroSeconds() - m_LastTime.GetMicroSeconds());
+    if (fpsInterval >= 1000000)
     {
         /* Output FPS */
-        if (FrameRate != NULL) { *FrameRate = m_Frames; }
-        m_Frames = 0;
-        m_LastTime = CurrentTime;
+        if (FrameRate != NULL) { *FrameRate = static_cast<uint32_t>(std::round((m_Frames - lastFrameRateSet)/(fpsInterval/1.0e6))); }
+
+        m_LastTime = CurrentFPSTime;
+        lastFrameRateSet = m_Frames;
         return true;
     }
     return false;

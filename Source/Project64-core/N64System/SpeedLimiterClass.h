@@ -43,4 +43,6 @@ private:
     uint32_t m_Speed, m_BaseSpeed, m_Frames, m_MicroSecondsPerFrame;
 
 	static const uint32_t m_DefaultSpeed;
+
+	static const uint32_t m_AverageSamples;
 };
